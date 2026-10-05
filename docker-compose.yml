@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+db:
+image: postgres:15-alpine
+container_name: infocom_db
+environment:
+POSTGRES_USER: postgres
+POSTGRES_PASSWORD: postgres_password
+POSTGRES_DB: implementation_db
+ports:
+- "5432:5432"
+volumes:
+- pgdata:/var/lib/postgresql/data
+
+backend:
+build: ./backend
+container_name: infocom_backend
+ports:
+- "8080:8080"
+depends_on:
+- db
+
+frontend:
+build: ./frontend
+container_name: infocom_frontend
+ports:
+- "3000:3000"
+depends_on:
+- backend
+
+volumes:
+pgdata:
