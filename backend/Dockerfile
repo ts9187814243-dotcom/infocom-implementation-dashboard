@@ -6,5 +6,5 @@ RUN g++ -02 -static -o server main.cpp
 
 FROM scratch
 COPY --from=builder /app/server /server
-EXPOSE 8000
+EXPOSE 8080
 CMD ["/server"]
