@@ -1,10 +1,11 @@
-FROM gcc::13 AS builder
+FROM node:20-alpine AS build
 WORKDIR /app
-RUN curl -0 https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h
-COPY app/main.cpp .
-RUN g++ -02 -static -o server main.cpp
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
 
-FROM scratch
-COPY --from=builder /app/server /server
-EXPOSE 8080
-CMD ["/server"]
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
