@@ -3,7 +3,6 @@ CREATE TABLE projects (
     name VARCHAR(255) NOT NULL,
     status VARCHAR(50) DEFAULT 'green'
 );
-
 CREATE TABLE tasks (
     id SERIAL PRIMARY KEY,
     project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
@@ -12,7 +11,6 @@ CREATE TABLE tasks (
     deadline TIMESTAMP WITH TIME ZONE,
     status VARCHAR(50) DEFAULT 'todo'
 );
-
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
