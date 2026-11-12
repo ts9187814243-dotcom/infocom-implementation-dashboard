@@ -7,9 +7,11 @@ RUN curl -sSL -o httplib.h https://raw.githubusercontent.com/yhirose/cpp-httplib
 
 # Копируем исходный код бэкенда из подпапки app
 COPY app/ ./
+COPY include/ ./include/
 
 # Компилируем C++ сервер
-RUN g++ -O2 main.cpp -o server -lpthread
+RUN g++ -O2 -I./include main.cpp
+-o server -lpthread
 
 # Финальный легкий образ
 FROM ubuntu:22.04
