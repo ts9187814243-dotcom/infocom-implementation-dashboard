@@ -1,20 +1,47 @@
 services:
-    backend:
-        build:
-            context: ./backend
-            dockerfile: Dockerfile
-        container_name: infocom-backend
-        ports:
-            - "8080:8080"
-        restart: always
+  database:
+    image: postgres:16
+    container_name: infocom-database
+    environment:
+      POSTGRES_DB: infocom
+      POSTGRES_USER: infocom
+      POSTGRES_PASSWORD: infocom_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infocom -d infocom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
 
-    frontend:
-        build:
-            context: ./frontend
-            dockerfile: Dockerfile
-        container_name: infocom-frontend
-        ports:
-            - "3000:80"
-        depends_on:
-            - backend
-        restart: always
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: infocom-backend
+    environment:
+      DATABASE_URL: postgresql://infocom:infocom_password@database:5432/infocom
+    ports:
+      - "8080:8080"
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: infocom-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: always
+
+volumes:
+  postgres_data:
