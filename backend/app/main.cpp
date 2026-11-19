@@ -1,8 +1,7 @@
 #include "httplib.h"
 #include "json.hpp"
-
 #include <pqxx/pqxx>
-
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -11,433 +10,269 @@
 
 using json = nlohmann::json;
 
-const std::string DEFAULT_STATUS = "todo";
-
 const std::vector<std::string> TASK_STATUSES = {
-    "todo",
-    "in_progress",
-    "done",
-    "blocker"
+    "todo", "in_progress", "done", "blocker"
 };
 
 const std::string& get_database_url() {
-    static const std::string database_url = []() {
+    static const std::string url = [] {
         const char* value = std::getenv("DATABASE_URL");
-
-        if (value == nullptr || std::string(value).empty()) {
-            throw std::runtime_error(
-                "DATABASE_URL environment variable is not set"
-            );
+        if (!value || std::string(value).empty()) {
+            throw std::runtime_error("DATABASE_URL is not set");
         }
-
         return std::string(value);
     }();
-
-    return database_url;
+    return url;
 }
 
-void send_json(
-    httplib::Response& res,
-    int status,
-    const json& data
-) {
+void send_json(httplib::Response& res, int status, const json& data) {
     res.status = status;
     res.set_content(data.dump(), "application/json; charset=utf-8");
 }
 
-void send_error(
-    httplib::Response& res,
-    int status,
-    const std::string& message
-) {
-    send_json(res, status, {
-        {"error", message}
-    });
+void send_error(httplib::Response& res, int status, const std::string& message) {
+    send_json(res, status, {{"error", message}});
 }
 
-// Проверка допустимого статуса задачи.
 bool is_valid_task_status(const std::string& status) {
-    for (const auto& allowed : TASK_STATUSES) {
-        if (status == allowed) {
-            return true;
-        }
-    }
-
-    return false;
+    return std::any_of(TASK_STATUSES.begin(), TASK_STATUSES.end(),
+        [&status](const std::string& allowed) { return allowed == status; });
 }
 
-// Получение списка проектов.
-void get_projects(
-    const httplib::Request&,
-    httplib::Response& res
-) {
+// GET /api/projects — projects with calculated traffic-light status.
+void get_projects(const httplib::Request&, httplib::Response& res) {
     try {
         pqxx::connection connection(get_database_url());
-        pqxx::read_transaction transaction(connection);
-
-        auto result = transaction.exec(
-            R"(
-                SELECT
-                    p.id,
-                    p.name,
-                    CASE
-                        WHEN EXISTS (
-                            SELECT 1
-                            FROM tasks t
-                            WHERE t.project_id = p.id
-                              AND t.status = 'blocker'
-                        )
-                        THEN 'red'
-
-                        WHEN EXISTS (
-                            SELECT 1
-                            FROM tasks t
-                            WHERE t.project_id = p.id
-                              AND t.status <> 'done'
-                              AND t.deadline IS NOT NULL
-                              AND t.deadline < NOW()
-                        )
-                        THEN 'yellow'
-
-                        ELSE 'green'
-                    END AS status
-                FROM projects p
-                ORDER BY p.id;
-            )"
-        );
-
+        pqxx::read_transaction tx(connection);
+        auto result = tx.exec(R"(
+            SELECT p.id, p.name,
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM tasks t
+                        WHERE t.project_id = p.id AND t.status = 'blocker')
+                    THEN 'red'
+                    WHEN EXISTS (SELECT 1 FROM tasks t
+                        WHERE t.project_id = p.id AND t.status <> 'done'
+                          AND t.deadline IS NOT NULL AND t.deadline < NOW())
+                    THEN 'yellow'
+                    ELSE 'green'
+                END AS calculated_status
+            FROM projects p ORDER BY p.id
+        )");
         json response = json::array();
-
         for (const auto& row : result) {
             response.push_back({
                 {"id", row["id"].as<int>()},
                 {"name", row["name"].as<std::string>()},
-                {"status", row["status"].as<std::string>()}
+                {"status", row["calculated_status"].as<std::string>()}
             });
         }
-
         send_json(res, 200, response);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "GET /api/projects: "
-                  << e.what() << std::endl;
-
-        send_error(res, 500, "Database error");
+    } catch (const std::exception& e) {
+        std::cerr << "GET /api/projects: " << e.what() << '\n';
+        send_error(res, 500, "Internal server error");
     }
 }
 
-// Создание задачи.
-void create_task(
-    const httplib::Request& req,
-    httplib::Response& res
-) {
-    json body;
+// GET /api/tasks — list tasks.
+void get_tasks(const httplib::Request&, httplib::Response& res) {
+    try {
+        pqxx::connection connection(get_database_url());
+        pqxx::read_transaction tx(connection);
+        auto result = tx.exec(R"(
+            SELECT id, project_id, title, assignee, deadline, status
+            FROM tasks ORDER BY id
+        )");
+        json response = json::array();
+        for (const auto& row : result) {
+            json deadline = nullptr;
+            if (!row["deadline"].is_null()) {
+                deadline = row["deadline"].as<std::string>();
+            }
+            response.push_back({
+                {"id", row["id"].as<int>()},
+                {"project_id", row["project_id"].as<int>()},
+                {"title", row["title"].as<std::string>()},
+                {"assignee", row["assignee"].is_null()
+                    ? json(nullptr) : json(row["assignee"].as<std::string>())},
+                {"deadline", deadline},
+                {"status", row["status"].as<std::string>()}
+            });
+        }
+        send_json(res, 200, response);
+    } catch (const std::exception& e) {
+        std::cerr << "GET /api/tasks: " << e.what() << '\n';
+        send_error(res, 500, "Internal server error");
+    }
+}
 
+// POST /api/tasks — create a task. deadline is required by the API contract.
+void create_task(const httplib::Request& req, httplib::Response& res) {
+    json body;
     try {
         body = json::parse(req.body);
-    }
-    catch (const json::exception&) {
+    } catch (const json::exception&) {
         send_error(res, 400, "Invalid JSON");
         return;
     }
 
-    // Проверяем обязательные поля.
-    if (!body.is_object() ||
-        !body.contains("project_id") ||
-        !body.contains("title")) {
-
-        send_error(
-            res,
-            400,
-            "project_id and title are required"
-        );
-
+    if (!body.is_object() || !body.contains("project_id") ||
+        !body.contains("title") || !body.contains("deadline")) {
+        send_error(res, 400, "project_id, title and deadline are required");
+        return;
+    }
+    if (!body["project_id"].is_number_integer() || !body["title"].is_string() ||
+        !body["deadline"].is_string()) {
+        send_error(res, 400, "Invalid field types");
         return;
     }
 
-    if (!body["project_id"].is_number_integer() ||
-        !body["title"].is_string()) {
-
-        send_error(
-            res,
-            400,
-            "Invalid project_id or title type"
-        );
-
+    const int project_id = body["project_id"].get<int>();
+    const std::string title = body["title"].get<std::string>();
+    const std::string deadline = body["deadline"].get<std::string>();
+    if (project_id <= 0 || title.empty() || title.size() > 255 ||
+        deadline.empty() || deadline.size() > 64) {
+        send_error(res, 400, "Invalid project_id, title or deadline");
         return;
     }
 
-    int project_id = body["project_id"].get<int>();
-    std::string title = body["title"].get<std::string>();
-
-    if (project_id <= 0 || title.empty() || title.size() > 255) {
-        send_error(res, 400, "Invalid project_id or title");
-        return;
-    }
-
-    std::string assignee = "Не назначен";
-
+    std::string assignee;
     if (body.contains("assignee") && !body["assignee"].is_null()) {
         if (!body["assignee"].is_string()) {
-            send_error(res, 400, "Invalid assignee");
+            send_error(res, 400, "assignee must be a string or null");
             return;
         }
-
         assignee = body["assignee"].get<std::string>();
-
         if (assignee.size() > 255) {
-            send_error(res, 400, "Assignee is too long");
+            send_error(res, 400, "assignee is too long");
             return;
         }
     }
 
-    std::string status = DEFAULT_STATUS;
-
+    std::string status = "todo";
     if (body.contains("status")) {
         if (!body["status"].is_string()) {
-            send_error(res, 400, "Invalid task status");
+            send_error(res, 400, "status must be a string");
             return;
         }
-
         status = body["status"].get<std::string>();
     }
-
     if (!is_valid_task_status(status)) {
         send_error(res, 400, "Unsupported task status");
         return;
     }
 
-    std::string deadline;
-
-    if (body.contains("deadline") && !body["deadline"].is_null()) {
-        if (!body["deadline"].is_string()) {
-            send_error(res, 400, "Invalid deadline");
-            return;
-        }
-
-        deadline = body["deadline"].get<std::string>();
-
-        if (deadline.empty() || deadline.size() > 64) {
-            send_error(res, 400, "Invalid deadline");
-            return;
-        }
-    }
-
     try {
         pqxx::connection connection(get_database_url());
-        pqxx::work transaction(connection);
-
-        // Проверяем существование проекта.
-        auto project = transaction.exec_params(
-            "SELECT id FROM projects WHERE id = $1",
-            project_id
-        );
-
+        pqxx::work tx(connection);
+        auto project = tx.exec_params("SELECT id FROM projects WHERE id = $1", project_id);
         if (project.empty()) {
             send_error(res, 404, "Project not found");
             return;
         }
 
-        // Создаем задачу.
-        auto result = transaction.exec_params(
-            R"(
-                INSERT INTO tasks (
-                    project_id,
-                    title,
-                    assignee,
-                    deadline,
-                    status
-                )
-                VALUES (
-                    $1,
-                    $2,
-                    $3,
-                    NULLIF($4, '')::timestamptz,
-                    $5
-                )
-                RETURNING id;
-            )",
-            project_id,
-            title,
-            assignee,
-            deadline,
-            status
-        );
+        // PostgreSQL validates the date/time format through the typed cast.
+        auto result = tx.exec_params(R"(
+            INSERT INTO tasks (project_id, title, assignee, deadline, status)
+            VALUES ($1, $2, NULLIF($3, ''), $4::timestamptz, $5)
+            RETURNING id, deadline
+        )", project_id, title, assignee, deadline, status);
 
-        int task_id = result[0]["id"].as<int>();
-
-        transaction.commit();
-
+        const int task_id = result[0]["id"].as<int>();
+        const std::string normalized_deadline = result[0]["deadline"].as<std::string>();
+        tx.commit();
         send_json(res, 201, {
-            {"id", task_id},
-            {"project_id", project_id},
-            {"title", title},
-            {"assignee", assignee},
-            {"deadline", deadline.empty() ? json(nullptr) : json(deadline)},
-            {"status", status}
+            {"id", task_id}, {"project_id", project_id}, {"title", title},
+            {"assignee", assignee.empty() ? json(nullptr) : json(assignee)},
+            {"deadline", normalized_deadline}, {"status", status}
         });
-    }
-    catch (const pqxx::sql_error& e) {
-        std::cerr << "POST /api/tasks SQL error: "
-                  << e.what() << std::endl;
-
-        send_error(res, 400, "Invalid task data");
-    }
-    catch (const std::exception& e) {
-        std::cerr << "POST /api/tasks: "
-                  << e.what() << std::endl;
-
+    } catch (const pqxx::sql_error& e) {
+        std::cerr << "POST /api/tasks SQL error: " << e.what() << '\n';
+        send_error(res, 400, "Invalid task data or deadline");
+    } catch (const std::exception& e) {
+        std::cerr << "POST /api/tasks: " << e.what() << '\n';
         send_error(res, 500, "Internal server error");
     }
 }
 
-// Расчет статуса конкретного проекта.
-void get_project_status(
-    const httplib::Request& req,
-    httplib::Response& res
-) {
+// GET /api/projects/{id}/status
+void get_project_status(const httplib::Request& req, httplib::Response& res) {
     try {
         if (req.matches.size() < 2) {
             send_error(res, 400, "Invalid project ID");
             return;
         }
-
-        int project_id = std::stoi(req.matches[1].str());
-
-        if (project_id <= 0) {
+        const std::string id_text = req.matches[1].str();
+        if (id_text.empty() || !std::all_of(id_text.begin(), id_text.end(),
+                [](unsigned char c) { return c >= '0' && c <= '9'; })) {
             send_error(res, 400, "Invalid project ID");
             return;
         }
+        const long id_long = std::stol(id_text);
+        if (id_long <= 0 || id_long > 2147483647L) {
+            send_error(res, 400, "Project ID is out of range");
+            return;
+        }
+        const int project_id = static_cast<int>(id_long);
 
         pqxx::connection connection(get_database_url());
-        pqxx::work transaction(connection);
-
-        auto result = transaction.exec_params(
-            R"(
-                SELECT
-                    p.id,
-                    CASE
-                        WHEN EXISTS (
-                            SELECT 1
-                            FROM tasks t
-                            WHERE t.project_id = p.id
-                              AND t.status = 'blocker'
-                        )
-                        THEN 'red'
-
-                        WHEN EXISTS (
-                            SELECT 1
-                            FROM tasks t
-                            WHERE t.project_id = p.id
-                              AND t.status <> 'done'
-                              AND t.deadline IS NOT NULL
-                              AND t.deadline < NOW()
-                        )
-                        THEN 'yellow'
-
-                        ELSE 'green'
-                    END AS calculated_status
-                FROM projects p
-                WHERE p.id = $1;
-            )",
-            project_id
-        );
-
+        pqxx::work tx(connection);
+        auto result = tx.exec_params(R"(
+            SELECT p.id,
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM tasks t
+                        WHERE t.project_id = p.id AND t.status = 'blocker')
+                    THEN 'red'
+                    WHEN EXISTS (SELECT 1 FROM tasks t
+                        WHERE t.project_id = p.id AND t.status <> 'done'
+                          AND t.deadline IS NOT NULL AND t.deadline < NOW())
+                    THEN 'yellow'
+                    ELSE 'green'
+                END AS calculated_status
+            FROM projects p WHERE p.id = $1
+        )", project_id);
         if (result.empty()) {
             send_error(res, 404, "Project not found");
             return;
         }
-
-        std::string calculated_status =
-            result[0]["calculated_status"].as<std::string>();
-
-        std::string reason = "Все в порядке";
-
-        if (calculated_status == "red") {
-            reason = "Найден блокер";
-        }
-        else if (calculated_status == "yellow") {
-            reason = "Есть просроченные задачи";
-        }
-
-        // Сохраняем рассчитанный статус проекта.
-        transaction.exec_params(
-            "UPDATE projects SET status = $1 WHERE id = $2",
-            calculated_status,
-            project_id
-        );
-
-        transaction.commit();
-
+        const std::string status = result[0]["calculated_status"].as<std::string>();
+        const std::string reason = status == "red" ? "Найден блокер" :
+            (status == "yellow" ? "Есть просроченные задачи" : "Все в порядке");
+        tx.exec_params("UPDATE projects SET status = $1 WHERE id = $2", status, project_id);
+        tx.commit();
         send_json(res, 200, {
-            {"project_id", project_id},
-            {"calculated_status", calculated_status},
-            {"reason", reason}
+            {"project_id", project_id}, {"calculated_status", status}, {"reason", reason}
         });
-    }
-    catch (const std::invalid_argument&) {
-        send_error(res, 400, "Invalid project ID");
-    }
-    catch (const std::out_of_range&) {
-        send_error(res, 400, "Project ID is out of range");
-    }
-    catch (const std::exception& e) {
-        std::cerr << "GET project status: "
-                  << e.what() << std::endl;
-
+    } catch (const std::exception& e) {
+        std::cerr << "GET project status: " << e.what() << '\n';
         send_error(res, 500, "Internal server error");
     }
 }
 
 int main() {
-    httplib::Server server;
-
-    // Проверяем подключение к базе при запуске.
     try {
+        // Fail early if the configured database is not reachable.
         pqxx::connection connection(get_database_url());
-
         if (!connection.is_open()) {
-            throw std::runtime_error("Cannot connect to PostgreSQL");
+            throw std::runtime_error("Database connection is not open");
         }
-
-        std::cout << "PostgreSQL connection established"
-                  << std::endl;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Database connection failed: "
-                  << e.what() << std::endl;
-
+    } catch (const std::exception& e) {
+        std::cerr << "Database connection failed: " << e.what() << '\n';
         return 1;
     }
 
-    // Проверка работоспособности сервера.
+    httplib::Server server;
     server.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        send_json(res, 200, {
-            {"status", "ok"}
-        });
+        send_json(res, 200, {{"status", "ok"}});
     });
-
-    // Получение проектов.
     server.Get("/api/projects", get_projects);
-
-    // Создание задачи.
+    server.Get("/api/tasks", get_tasks);
     server.Post("/api/tasks", create_task);
+    server.Get(R"(/api/projects/(\d+)/status)", get_project_status);
 
-    // Получение статуса проекта.
-    server.Get(
-        R"(/api/projects/(\d+)/status)",
-        get_project_status
-    );
-
-    std::cout << "Backend started on port 8080"
-              << std::endl;
-
+    std::cout << "Backend listening on 0.0.0.0:8080\n";
     if (!server.listen("0.0.0.0", 8080)) {
-        std::cerr << "Failed to start HTTP server"
-                  << std::endl;
-
+        std::cerr << "Failed to start HTTP server\n";
         return 1;
     }
-
     return 0;
 }
