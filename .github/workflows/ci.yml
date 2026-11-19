@@ -2,35 +2,63 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [ develop, main ]
+    branches: [develop, main]
   pull_request:
-    branches: [ develop, main ]
+    branches: [develop, main]
 
 jobs:
-  lint-and-check:
+  backend-build-analysis:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-
-      - name: Install CPP Linter and Cppcheck
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck
+          sudo apt-get install -y g++ curl libpqxx-dev libpq-dev cppcheck
 
-      - name: Run C++ Static Analysis (Backend)
+      - name: Download httplib
         run: |
-          echo "Running Cppcheck for C++ backend files..."
-          cppcheck --enable=warning,style --inline-suppr backend/ || true
+          curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o /tmp/httplib.h
 
-      - name: Check Project Structure
+      - name: Compile backend
         run: |
-          echo "Checking essential files..."
-          test -f docs/openapi.yaml && echo "OpenAPI spec present."
-          test -f docker-compose.yml && echo "docker-compose present."
-          echo "CI Pipeline execution finished successfully."
+          g++ -std=c++17 -O2 -Wall -Wextra \
+            -I/tmp -Ibackend/include \
+            backend/app/main.cpp \
+            -o /tmp/backend-server \
+            -lpqxx -lpq -pthread
+
+      - name: Run Cppcheck
+        run: |
+          cppcheck --enable=warning,style \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            backend/app/main.cpp
+
+      - name: Validate migration shell script
+        run: sh -n backend/migrate.sh
+
+      - name: Validate Docker Compose
+        run: docker compose config --quiet
+
+      - name: Build backend Docker image
+        run: docker build -t infocom-backend-ci ./backend
+
+      - name: Check required files
+        run: |
+          test -f backend/app/main.cpp
+          test -f backend/include/json.hpp
+          test -f backend/Dockerfile
+          test -f backend/migrations/001_init.sql
+          test -f backend/migrations/002_constraints_indexes.sql
+          test -f backend/migrate.sh
+          test -f docker-compose.yml
+          test -f docs/openapi.yaml
+
+  frontend-structure-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check frontend files
+        run: test -f frontend/Dockerfile

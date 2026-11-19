@@ -1,24 +1,24 @@
-FROM gcc:13 AS builder
-
+FROM ubuntu:22.04 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++ make curl ca-certificates libpqxx-dev libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+RUN curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o httplib.h
+COPY app/ ./app/
+COPY include/ ./include/
+RUN g++ -std=c++17 -O2 -Wall -Wextra \
+    -I/app -I/app/include \
+    /app/app/main.cpp -o /app/server \
+    -lpqxx -lpq -pthread
 
-# Скачиваем заголовочный файл httplib.h
-RUN curl -sSL -o httplib.h https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h
-
-# Копируем исходный код бэкенда из подпапки app
-COPY app/ ./
-
-# Компилируем C++ сервер
-RUN g++ -O2 main.cpp -o server -lpthread
-
-# Финальный легкий образ
 FROM ubuntu:22.04
-
-RUN apt-get update && apt-get install -y libstdc++6 ca-certificates && rm -rf /var/lib/apt/lists/*
-
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 libpqxx-6.4 ca-certificates postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=builder /app/server .
-
+COPY --from=builder /app/server /app/server
+COPY migrate.sh /app/migrate.sh
+COPY migrations/ /app/migrations/
+RUN chmod +x /app/migrate.sh
 EXPOSE 8080
-
-CMD ["./server"]
+CMD ["/app/migrate.sh"]
