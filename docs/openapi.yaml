@@ -2,64 +2,125 @@ openapi: 3.0.3
 info:
   title: Infocom Implementation Dashboard API
   version: 1.0.0
-  description: API-контракт для дашборда проектов внедрения и управления задачами (ЛР №2).
+  description: API for implementation project tracking and task management.
 servers:
-  - url: http://localhost:8080/api
-  description: Локальный сервер разработки
-
+  - url: http://localhost:8080
 paths:
-  /projects:
+  /health:
     get:
-      summary: Получить список всех проектов
-      description: Возвращает список проектов внедрения с их текущими статусами и цветовой индикацией.
+      summary: Health check
       responses:
         '200':
-          description: Успешный ответ со списком проектов.
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /api/projects:
+    get:
+      summary: List projects and calculated statuses
+      responses:
+        '200':
+          description: Project list
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: '#/components/schemas/Project'
-
-/tasks:
-  post:
-    summary: Создать новую задачу
-    description: Аналитик-внедренец создает задачу, указывает исполнителя, дедлайн и статус.
-    requestBody:
-      required: true
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks:
+    get:
+      summary: List tasks
+      responses:
+        '200':
+          description: Task list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: Create task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskInput'
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Project not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/status:
+    get:
+      summary: Calculate project status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Calculated project status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Project not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  responses:
+    BadRequest:
+      description: Invalid request
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/TaskInput'
-    responses:
-      '201':
-        description: Задача успешно создана.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Task'
-
-/projects/{id}/status:
-  get:
-    summary: Получить статус конкретного проекта
-    description: Возвращает актуальный статус проекта с учетом автоматического пересчета по задачам (блокиры, просрочки).
-    parameters:
-      - name: id
-      in: path
-      required: true
-      schema:
-        type: integer
-    responses:
-      '200':
-        description: Актуальный статус проекта.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ProjectStatus'
-
-components:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
   schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
     Project:
       type: object
       properties:
@@ -70,45 +131,49 @@ components:
         status:
           type: string
           enum: [green, yellow, red]
-          description: "green - В сроке, yellow - Есть риски, red - Блокер"
-
+      required: [id, name, status]
     TaskInput:
       type: object
-      required:
-        - title
-        - project_id
-        - deadline
+      required: [project_id, title, deadline]
       properties:
-        title:
-          type: string
         project_id:
           type: integer
+          minimum: 1
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
         assignee:
           type: string
+          maxLength: 255
+          nullable: true
         deadline:
           type: string
           format: date-time
         status:
           type: string
-          enum: [todo, in_progress, blocker, done]
-
+          enum: [todo, in_progress, done, blocker]
+          default: todo
     Task:
       type: object
       properties:
         id:
           type: integer
-        title:
-          type: string
         project_id:
           type: integer
+        title:
+          type: string
         assignee:
           type: string
+          nullable: true
         deadline:
           type: string
           format: date-time
+          nullable: true
         status:
           type: string
-
+          enum: [todo, in_progress, done, blocker]
+      required: [id, project_id, title, status]
     ProjectStatus:
       type: object
       properties:
@@ -119,4 +184,4 @@ components:
           enum: [green, yellow, red]
         reason:
           type: string
-          description: Причина изменения статуса (например, "Есть просроченные задачи" или "Обнаружен блокер")
+      required: [project_id, calculated_status, reason]
