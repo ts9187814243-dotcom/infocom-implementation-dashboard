@@ -43,7 +43,7 @@ jobs:
         run: docker compose config --quiet
 
       - name: Build backend Docker image
-        run: docker build -t infocom-backend-ci ./backend
+        run: docker build --no-cache -t infocom-backend-ci ./backend
 
       - name: Check required files
         run: |

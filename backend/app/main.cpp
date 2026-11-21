@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -59,13 +60,16 @@ void get_projects(const httplib::Request&, httplib::Response& res) {
             FROM projects p ORDER BY p.id
         )");
         json response = json::array();
-        for (const auto& row : result) {
-            response.push_back({
-                {"id", row["id"].as<int>()},
-                {"name", row["name"].as<std::string>()},
-                {"status", row["calculated_status"].as<std::string>()}
-            });
-        }
+        std::transform(
+            result.begin(), result.end(), std::back_inserter(response),
+            [](const pqxx::row& row) {
+                return json{
+                    {"id", row["id"].as<int>()},
+                    {"name", row["name"].as<std::string>()},
+                    {"status", row["calculated_status"].as<std::string>()}
+                };
+            }
+        );
         send_json(res, 200, response);
     } catch (const std::exception& e) {
         std::cerr << "GET /api/projects: " << e.what() << '\n';
@@ -83,21 +87,21 @@ void get_tasks(const httplib::Request&, httplib::Response& res) {
             FROM tasks ORDER BY id
         )");
         json response = json::array();
-        for (const auto& row : result) {
-            json deadline = nullptr;
-            if (!row["deadline"].is_null()) {
-                deadline = row["deadline"].as<std::string>();
+        std::transform(
+            result.begin(), result.end(), std::back_inserter(response),
+            [](const pqxx::row& row) {
+                json deadline = nullptr;
+                if (!row["deadline"].is_null()) deadline = row["deadline"].as<std::string>();
+                return json{
+                    {"id", row["id"].as<int>()},
+                    {"project_id", row["project_id"].as<int>()},
+                    {"title", row["title"].as<std::string>()},
+                    {"assignee", row["assignee"].is_null() ? json(nullptr) : json(row["assignee"].as<std::string>())},
+                    {"deadline", deadline},
+                    {"status", row["status"].as<std::string>()}
+                };
             }
-            response.push_back({
-                {"id", row["id"].as<int>()},
-                {"project_id", row["project_id"].as<int>()},
-                {"title", row["title"].as<std::string>()},
-                {"assignee", row["assignee"].is_null()
-                    ? json(nullptr) : json(row["assignee"].as<std::string>())},
-                {"deadline", deadline},
-                {"status", row["status"].as<std::string>()}
-            });
-        }
+        );
         send_json(res, 200, response);
     } catch (const std::exception& e) {
         std::cerr << "GET /api/tasks: " << e.what() << '\n';
